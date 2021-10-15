@@ -1,0 +1,232 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: '*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+
+      - name: Check Rust formatting
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - name: Install tools
+        run: |
+          # Install with Pip instead of Apt because Ubuntu ships ancient versions.
+          # TODO: Pin the exact version with Nix instead, to make it easier to use
+          # the same version locally.
+          sudo apt update
+          sudo apt-get install -y python3-pip
+          sudo pip3 install black==21.6b0
+
+      - name: Check Python formatting
+        run: |
+          git ls-files | grep '\.py$' | xargs black --skip-string-normalization --check --diff --color
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+
+    - name: cache-build-artifacts
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~/.rustup/toolchains
+          # If we only cache ~/.cargo, for some reason Cargo still downloads crates later,
+          # so instead we cache the individual subdirectories and files, which hopefully
+          # works. Some of the top-level files are needed to make "cargo install" work.
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: build-1.7.8-v1-${{ hashFiles('Cargo.lock') }}
+        restore-keys: build-1.7.8-v1
+
+    - name: Install development tools
+      run: |
+        sudo apt update
+        sudo apt-get install -y libudev-dev
+        sh -c "$(curl -sSfL https://release.solana.com/v1.7.8/install)"
+
+    - name: Run unit tests
+      run: |
+        cargo test --manifest-path program/Cargo.toml
+        cargo test --manifest-path cli/Cargo.toml
+
+    - name: Build on-chain BPF programs
+      run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+
+        # Build all BPF programs in the workspace, including the multisig program,
+        # because we will need them later to test Solido.
+        cargo build-bpf
+
+    - name: Test on-chain BPF programs
+      run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+
+        # But only run the tests for Solido itself, the SPL tests are already
+        # executed upstream.
+        cargo test-bpf --manifest-path program/Cargo.toml
+
+    - name: Build CLI client
+      run: cargo build --bin solido
+
+    - name: Run Solido integration test
+      run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+        validator=$(tests/start_test_validator.py)
+
+        # Perform initial Solana setup.
+        solana-keygen new --no-bip39-passphrase --silent
+        solana config set --url http://127.0.0.1:8899
+        # Try to airdrop some times in case it fails
+        tests/airdrop_lamports.sh
+
+        tests/test_solido.py
+        kill $validator
+
+    - name: Run Multisig integration test
+      run: |
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+        validator=$(tests/start_test_validator.py)
+
+        # We don't need to run keygen/setup again, the private key and state
+        # should still be there from the previous run.
+
+        tests/test_multisig.py
+        kill $validator
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+
+    - name: cache-build-artifacts
+      uses: actions/cache@v2
+      with:
+        path: |
+          ~/.rustup/toolchains
+          # If we only cache ~/.cargo, for some reason Cargo still downloads crates later,
+          # so instead we cache the individual subdirectories and files, which hopefully
+          # works. Some of the top-level files are needed to make "cargo install" work.
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: lint-1.7.8-v1-${{ hashFiles('Cargo.lock') }}
+        restore-keys: lint-1.7.8-v1
+
+    - name: Install linters
+      run: |
+        # TODO: Pin the exact version with Nix.
+        sudo apt update
+        sudo apt-get install -y python3-pip libudev-dev
+        # Install with Pip instead of Apt because Ubuntu ships ancient versions.
+        # TODO: Pin the exact version with Nix instead, to make it easier to use
+        # the same version locally.
+        sudo pip3 install mypy==0.902
+        rustup component add clippy
+        cargo install cargo-license --version 0.4.1
+
+    - name: Run Clippy
+      run: |
+        cargo clippy --manifest-path program/Cargo.toml -- --deny warnings
+        cargo clippy --manifest-path cli/Cargo.toml -- --deny warnings
+
+    - name: Typecheck Python
+      run: |
+        git ls-files | grep '\.py$' | xargs mypy --strict
+
+    - name: Check license compatibility
+      run: |
+        tests/check_licenses.py
+
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+
+      - name: cache-build-artifacts
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.rustup/toolchains
+            # If we only cache ~/.cargo, for some reason Cargo still downloads crates later,
+            # so instead we cache the individual subdirectories and files, which hopefully
+            # works. Some of the top-level files are needed to make "cargo install" work.
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: coverage-1.7.8-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: coverage-1.7.8-v1
+
+      - name: Install development tools
+        run: |
+          sudo apt update
+          sudo apt-get install -y libudev-dev
+          rustup component add llvm-tools-preview
+          rustup toolchain install nightly-2021-06-25
+          cargo install rustfilt cargo-binutils
+          sh -c "$(curl -sSfL https://release.solana.com/v1.7.8/install)"
+
+      - name: Build on-chain programs (without coverage)
+        run: |
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          cargo +nightly-2021-06-25 build-bpf
+
+      - name: Collect coverage
+        run: |
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          validator=$(tests/start_test_validator.py)
+
+          # Perform initial Solana setup.
+          solana-keygen new --no-bip39-passphrase --silent
+          solana config set --url http://127.0.0.1:8899
+          # Try to airdrop some times in case it fails
+          tests/airdrop_lamports.sh
+
+          tests/coverage.py
+          kill $validator
+
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v1
+        with:
+          token: ${{secrets.CODECOV_TOKEN}}
+          directory: coverage
+
