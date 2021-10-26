@@ -1,6 +1,6 @@
 # Stake-Pool
 
-Stake Pool Dasboard - Preliminary SPL token swap backend interface.
+Stake Pool Dasboard - Preliminary stake pool atatistics and Dapp token resource backend.
 
 Interface - Will later be merged into the UI repo for Validator wars and integrated into our metaplex flow
 
